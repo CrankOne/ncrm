@@ -121,5 +121,7 @@ ncrm_je_query( const struct ncrm_JournalEntries * src
                 , struct ncrm_JournalEntry *** dest
                 );
 
+struct ncrm_Extension;
+
 #endif /* H_NCRM_MONITOR_JOURNAL_ENTRIES_H */
 

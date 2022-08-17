@@ -1,4 +1,6 @@
 #include "ncrm_model.h"
+#include "ncrm_extension.h"
+#include "ncrm_queue.h"
 
 #include <panel.h>
 #include <assert.h>
@@ -35,20 +37,14 @@ attr_t gSpecialAttrs[] = { A_NORMAL /* 0 - Normal mode */
     , A_BLINK  /* 4 - requires (immediate) attention / fatal error */
 };
 
-
-/**\brief Represents extension to monitoring app.
- * Extension are shown as switchable tabs composed in multiple windows+panels
- * */
-struct ncrm_Extension {
-    char * name;
-    // void * data; ... TODO ?
-};
-
 static struct App {
     /** Model show */
     struct ncrm_Model * model;
     
-    uint16_t lines, columns;
+    uint16_t lines:10
+           , columns:10
+           , exitFlag:1
+           ;
 
     /** A window/panel showing tabs. It is always of full width and
      * of 1 height. It is always visible and can not be cycled. */
@@ -457,6 +453,13 @@ update_footer( int maxlen ) {
     wattrset(gApp.w_statusFooter, footerAttrs );
 }
 
+void
+process_event(struct ncrm_Event * eventPtr, void * _) {
+    /* Calls curses routines to update the GUI, may forward execution to
+     * extension's updating function */
+    // ...
+}
+
 int
 main(int argc, char * argv[]) {
     { /* XXX, set mock "extensions" */
@@ -511,17 +514,17 @@ main(int argc, char * argv[]) {
     /* Initialize layout */
     init_wins();
 
-    /* Update contetn */
-    update_header();
-    update_footer( gApp.columns );
+    /* Enter event loop */
+    ncrm_queue_init();
+    while(!gApp.exitFlag) {
+    	update_panels();  /* Update the stacking order. */
+    	doupdate();  /* Show it on the screen */
+        ncrm_do_with_events(process_event, NULL);
+    }
+    ncrm_queue_free();
+    endwin();
 
-    /* Update the stacking order. */
-	update_panels();
-	/* Show it on the screen */
-	doupdate();
-	
-	getch();
-	endwin();
+    return EXIT_SUCCESS;
 }
 
 
