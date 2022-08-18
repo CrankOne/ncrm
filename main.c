@@ -7,6 +7,7 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 #define NCRM_MAX_STATUSBAR_TXT_LEN 128
 
@@ -38,8 +39,11 @@ attr_t gSpecialAttrs[] = { A_NORMAL /* 0 - Normal mode */
 };
 
 static struct App {
-    /** Model show */
+    /** Model to show */
     struct ncrm_Model * model;
+    /** milliseconds counter; not a precise one, used rather as an auxiliary
+     * timer for animations and stuff */
+    uint16_t updateCount;
     
     uint16_t lines:10
            , columns:10
@@ -60,7 +64,21 @@ static struct App {
     struct ncrm_Extension ** extensions;
     /** Number of active extension */
     int8_t nActiveExtension;
+
+    /* Keypress listener stuff */
+    // ...
 } gApp;
+
+/** This function just emits updates periodically. */
+static void *
+_idle_updater(void * _) {
+    for(;;) {
+        struct ncrm_Event event = { 0x0 };
+        ncrm_enqueue(&event);
+        usleep(1.e5);
+    }
+    return NULL;
+}
 
 void
 init_wins() {
@@ -88,6 +106,7 @@ update_header() {
      * with all "tab headers" underlined except for one that is currently
      * "active"
      * */
+    wmove(gApp.w_statusFooter, 0, 0);
     wattron(gApp.w_tabsHeader, A_BOLD );
 
     wattron(gApp.w_tabsHeader, A_UNDERLINE | A_DIM);
@@ -271,13 +290,96 @@ const char gSpinnerSeq[] = "-\\|/";
 "     ."
 #endif
 
+static const char gSpinner[][17] = {
+    #if 0
+    "#---------------",
+    ">>--------------",
+    "->>>------------",
+    "---->>>---------",
+    "------->>>------",
+    "---------->>>---",
+    "------------>>>-",
+    "-------------->>",
+    "---------------#",
+    "--------------<<",
+    "------------<<<-",
+    "----------<<<---",
+    "-------<<<------",
+    "----<<<---------",
+    "-<<<------------",
+    "<<--------------",
+    #endif
+    #if 0
+    "...             ",
+    ".. .            ",
+    ". . .           ",
+    " . .  .         ",
+    "  .  .   .      ",
+    "   .    .   .   ",
+    "      .    .  . ",
+    "         .  .  .",
+    "            . ..",
+    "             ...",
+    "            . ..",
+    "         .  .  .",
+    "      .    .  . ",
+    "   .    .   .   ",
+    "  .  .   .      ",
+    " . .  .         ",
+    ". . .           ",
+    ".. .            ",
+    #else
+    "|||             ",
+    "|| /            ",
+    "| / -           ",
+    " / -  \\         ",
+    "  -  \\   |       ",
+    "   \\    |   /   ",
+    "      |    / -  ",
+    "         /  - \\ ",
+    "           - \\ |",
+    "            \\ ||",
+    "             |||",
+    "            / ||",
+    "           - / |",
+    "         \\  - / ",
+    "      |     \\ - ",
+    "   /    |    \\  ",
+    " -   /   |      ",
+    " \\ -  /         ",
+    "| \\ -           ",
+    "|| \\            ",
+    #endif
+};
+
+#if 0
+static const wchar_t gSpinner[][3] = {
+    "⢀⠀", "⡀⠀", "⠄⠀", "⢂⠀", "⡂⠀", "⠅⠀",
+	"⢃⠀", "⡃⠀", "⠍⠀", "⢋⠀", "⡋⠀", "⠍⠁",
+    "⢋⠁", "⡋⠁", "⠍⠉", "⠋⠉", "⠋⠉", "⠉⠙",
+    "⠉⠙", "⠉⠩", "⠈⢙", "⠈⡙", "⢈⠩", "⡀⢙",
+	"⠄⡙", "⢂⠩", "⡂⢘", "⠅⡘", "⢃⠨", "⡃⢐",
+	"⠍⡐", "⢋⠠", "⡋⢀", "⠍⡁", "⢋⠁", "⡋⠁",
+	"⠍⠉", "⠋⠉", "⠋⠉", "⠉⠙", "⠉⠙", "⠉⠩",
+	"⠈⢙", "⠈⡙", "⠈⠩", "⠀⢙", "⠀⡙", "⠀⠩",
+	"⠀⢘", "⠀⡘", "⠀⠨", "⠀⢐", "⠀⡐", "⠀⠠",
+	"⠀⢀", "⠀⡀", "" };
+#endif
+
 static int _progress__spinner(char * bf) {
     /* produces "spinner" string reflecting ongoing activity of the
      * application. Depends on both, processed entries and elapsed time. */
     assert(gApp.model);
     /* TODO: need more info about app evaluation to provide adequate update
      * seed */
-    return 0;
+    static const int nFrames = sizeof(gSpinner)/sizeof(*gSpinner);
+    const int frameLen = strlen(*gSpinner);
+    const int nFrame = gApp.updateCount%nFrames;
+    bf[0] = '[';
+    memcpy(bf+1, gSpinner[nFrame], frameLen);
+    bf[frameLen + 1] = ']';
+    bf[frameLen + 2] = '\0';
+    return strlen(bf);
 }
 
 static int _progress__status_msg(char * bf) {
@@ -364,6 +466,7 @@ static int _process__sort_by_spinner_order(const void * a_, const void * b_) {
 
 void
 update_footer( int maxlen ) {
+    wmove(gApp.w_statusFooter, 0, 0);
     attr_t footerAttrs = A_DIM;
     wattrset(gApp.w_statusFooter, footerAttrs );
     whline(gApp.w_statusFooter, '/', gApp.columns);
@@ -457,11 +560,16 @@ void
 process_event(struct ncrm_Event * eventPtr, void * _) {
     /* Calls curses routines to update the GUI, may forward execution to
      * extension's updating function */
-    // ...
+    if( 0x0 == eventPtr->type ) {
+        ++gApp.updateCount;
+        update_footer(gApp.columns);
+        return;
+    }
 }
 
 int
 main(int argc, char * argv[]) {
+    gApp.updateCount = 0;
     { /* XXX, set mock "extensions" */
         gApp.extensions = malloc(sizeof(struct ncrm_Extension *)*5);
         gApp.extensions[4] = NULL;
@@ -485,7 +593,7 @@ main(int argc, char * argv[]) {
         gApp.model = malloc(sizeof(struct ncrm_Model));
         gApp.model->journalEntries = NULL;
         gApp.model->currentProgress = 1563;
-        gApp.model->maxProgress = 5000;
+        //gApp.model->maxProgress = 5000;
         gApp.model->elapsedTime = (5*60 + 23)*1000 + 345;
         gApp.model->statusMessage = strdup("running");
     }
@@ -514,8 +622,19 @@ main(int argc, char * argv[]) {
     /* Initialize layout */
     init_wins();
 
-    /* Enter event loop */
+    /* Forcefully update header and footer on somewhat initial state for the
+     * first time. They will further be updated from within event loop. */
+    update_header();
+    update_footer(gApp.columns);
+
+    /* Enter queue */
     ncrm_queue_init();
+
+    /* Spawn the threads */
+    pthread_t idelUpdaterThread;
+    pthread_create( &idelUpdaterThread, NULL, _idle_updater, NULL );
+
+    /* Event loop */
     while(!gApp.exitFlag) {
     	update_panels();  /* Update the stacking order. */
     	doupdate();  /* Show it on the screen */

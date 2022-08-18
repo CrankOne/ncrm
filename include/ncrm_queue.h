@@ -9,6 +9,15 @@
 
 /**\brief Representation of asynchroneous event (subject of event queue) */
 struct ncrm_Event {
+    /* Codes:
+     *  0x0  -- unidentified (reserved)
+     *  0x1  -- increment update count
+     *  0x2  -- keypress
+     *  0x3  -- to be dispatched to an extension
+     *  0x4  -- header update
+     *  0x5  -- footer update
+     *  ...
+     * */
     int type:4;
     // ...
     union Payload {

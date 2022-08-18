@@ -71,8 +71,8 @@ ncrm_enqueue( struct ncrm_Event * eventPtr ) {
     /* Add event list entry into queue */
     pthread_mutex_lock(&(gQueue.mtxQueueEmpty));
     {
-        if( ! gQueue.tail ) {
-            assert(gQueue.head);
+        if( !gQueue.tail ) {
+            assert(!gQueue.head);
             gQueue.head = gQueue.tail = evListEntry;
         } else {
             gQueue.tail->next = evListEntry;
