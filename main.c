@@ -2,6 +2,8 @@
 #include "ncrm_extension.h"
 #include "ncrm_queue.h"
 
+#include "ncrm_journalEntries.h"
+
 #include <panel.h>
 #include <assert.h>
 
@@ -64,18 +66,26 @@ static struct App {
     struct ncrm_Extension ** extensions;
     /** Number of active extension */
     int8_t nActiveExtension;
-
-    /* Keypress listener stuff */
-    // ...
 } gApp;
 
 /** This function just emits updates periodically. */
 static void *
 _idle_updater(void * _) {
     for(;;) {
-        struct ncrm_Event event = { 0x0 };
+        struct ncrm_Event event = { 0x1 };
         ncrm_enqueue(&event);
         usleep(1.e5);
+    }
+    return NULL;
+}
+
+static void *
+_user_input(void * _) {
+    struct ncrm_Event event = { 0x2 };
+    while(read( STDIN_FILENO
+              , &event.payload.keycode
+              , sizeof(event.payload.keycode)) != 0) {
+        ncrm_enqueue(&event);
     }
     return NULL;
 }
@@ -309,26 +319,7 @@ static const char gSpinner[][17] = {
     "-<<<------------",
     "<<--------------",
     #endif
-    #if 0
-    "...             ",
-    ".. .            ",
-    ". . .           ",
-    " . .  .         ",
-    "  .  .   .      ",
-    "   .    .   .   ",
-    "      .    .  . ",
-    "         .  .  .",
-    "            . ..",
-    "             ...",
-    "            . ..",
-    "         .  .  .",
-    "      .    .  . ",
-    "   .    .   .   ",
-    "  .  .   .      ",
-    " . .  .         ",
-    ". . .           ",
-    ".. .            ",
-    #else
+    #if 1
     "|||             ",
     "|| /            ",
     "| / -           ",
@@ -383,23 +374,25 @@ static int _progress__spinner(char * bf) {
 }
 
 static int _progress__status_msg(char * bf) {
-    /* produces status message -- literally as given in model + [], e.g.
-     * running -> " [ running ]" */
+    /* produces status message consisting optionally of the service message
+     * and application message. If both provided, they're separated with " // ",
+     * e.g.:
+     *  1. " connecting // "
+     *  2. " // running "
+     *  3. " disconnected // error "
+     * */
     assert(gApp.model);
-    if(!gApp.model->statusMessage) {
-        *bf = '\0';
-        return 0;
-    } else {
-        return snprintf( bf, NCRM_MAX_STATUSBAR_TXT_LEN
-                       , " %s ", gApp.model->statusMessage
-                       );
-    }
+    return snprintf( bf, NCRM_MAX_STATUSBAR_TXT_LEN
+                   , " %s // %s "
+                   , gApp.model->serviceMsg
+                   , gApp.model->appMsg
+                   );
 }
 
 static const struct ProgressInfoEntry {
     /* Priority and order number: in progress bar mode, in spinner mode.
      * Zero priority means that entry is not used in this mode */
-    int orp[2][2];
+    char orp[2][2];
     /* String formatting function callback */
     int (*print_callback)(char * dest);
     /* ncurses attribute to apply */
@@ -415,7 +408,7 @@ static const struct ProgressInfoEntry {
     { {{ 5, 6}, { 3,  4}}, _progress__proc_speed     , A_NORMAL },
     { {{98,-1}, { 1,  1}}, _progress__spinner        , A_NORMAL },
     { {{ 0, 0}, { 0,  0}}, _progress__status_msg     , A_REVERSE | A_BOLD },
-    { {{99,99}, {99, -1}}, NULL }  /* sentinel */
+    { {{99,-1}, {99, -1}}, NULL }  /* sentinel */
 };
 
 struct ProgressInfoEntryHandle {
@@ -471,14 +464,7 @@ update_footer( int maxlen ) {
     wattrset(gApp.w_statusFooter, footerAttrs );
     whline(gApp.w_statusFooter, '/', gApp.columns);
 
-    #if 0  // XXX, tests
-    {
-        char bf[NCRM_MAX_STATUSBAR_TXT_LEN] = "0s";
-        assert( _status_format_time( ( 2*60*60 + 11*60 + 3 )*1000
-                                   , bf) );
-        wprintw(gApp.w_statusFooter, bf);
-    }
-    #endif
+    pthread_mutex_lock(&gApp.model->lock);
 
     if((!gApp.model) || !gApp.model->currentProgress) return;
     static const int nWidgets = sizeof(gProgressInfoEntries)/sizeof(*gProgressInfoEntries);
@@ -488,11 +474,14 @@ update_footer( int maxlen ) {
       ;
     /* set handles */
     for( const struct ProgressInfoEntry * pce = gProgressInfoEntries
-       ; pce->print_callback
+       ; pce->orp[0][0] != 99 && pce->print_callback
        ; ++pce, ++i ) {
         piehs[i].pie = pce;
         piehs[i].buf[0] = '\0';
+
         if(pce->orp[pIdx][1] == -1) {  /* widget is not used */
+            /* ^^^ valgrind complains about uninitialized value here, but how
+             *     can it be the case if static table above is fully set?! */
             piehs[i].occupied = 0;
             continue;
         }
@@ -554,48 +543,69 @@ update_footer( int maxlen ) {
         }
     }
     wattrset(gApp.w_statusFooter, footerAttrs );
+    pthread_mutex_unlock(&gApp.model->lock);
 }
 
 void
 process_event(struct ncrm_Event * eventPtr, void * _) {
     /* Calls curses routines to update the GUI, may forward execution to
      * extension's updating function */
-    if( 0x0 == eventPtr->type ) {
+    if( 0x1 == eventPtr->type ) {  /* increment update count */
         ++gApp.updateCount;
         update_footer(gApp.columns);
         return;
+    }
+    if( 0x2 == eventPtr->type ) {  /* keypress event */
+        if( eventPtr->payload.keycode == 'q' ) {  /* exit */
+            gApp.exitFlag = 0x1;
+        }
+        /* ignore other keypresses */
+        return;
+    }
+    if(0x3 == eventPtr->type) {  /* forward event to extension update */
+        for( struct ncrm_Extension ** extPtr = gApp.extensions
+           ; *extPtr
+           ; ++extPtr ) {
+            if( !strcmp( eventPtr->payload.forExtension.extensionName
+                       , (*extPtr)->name
+                       ) )
+            (*extPtr)->update(*extPtr, eventPtr);
+        }
     }
 }
 
 int
 main(int argc, char * argv[]) {
     gApp.updateCount = 0;
-    { /* XXX, set mock "extensions" */
+    { /* Default extensions */
         gApp.extensions = malloc(sizeof(struct ncrm_Extension *)*5);
-        gApp.extensions[4] = NULL;
+        gApp.extensions[1] = NULL;
         
-        gApp.extensions[0] = malloc(sizeof(struct ncrm_Extension));
-        gApp.extensions[0]->name = strdup("Logs");
+        gApp.extensions[0] = &gJournalExtension;
 
-        gApp.extensions[1] = malloc(sizeof(struct ncrm_Extension));
-        gApp.extensions[1]->name = strdup("Handlers");
-
-        gApp.extensions[2] = malloc(sizeof(struct ncrm_Extension));
-        gApp.extensions[2]->name = strdup("Calibrations");
-
-        gApp.extensions[3] = malloc(sizeof(struct ncrm_Extension));
-        gApp.extensions[3]->name = strdup("Resources");
-
-        gApp.nActiveExtension = 2;
+        gApp.nActiveExtension = 0;
     }
+
+    /* Configure extensions */
+    struct ncrm_JournalExtensionConfig jCfg = {
+        NULL,  /* modelPtr (set automatically) */
+        "tcp://127.0.0.1:5598",  /* addres to subscribe */
+        100  /* network query interval, msec */
+    };
+    gApp.extensions[0]->userData = &jCfg;
 
     { /* XXX, mock "model" */
         gApp.model = malloc(sizeof(struct ncrm_Model));
-        gApp.model->journalEntries = NULL;
+        pthread_mutex_init(&gApp.model->lock, NULL);
+        //gApp.model->journalEntries = NULL;
         gApp.model->currentProgress = 1563;
+        gApp.model->maxProgress = 0;
         //gApp.model->maxProgress = 5000;
         gApp.model->elapsedTime = (5*60 + 23)*1000 + 345;
-        gApp.model->statusMessage = strdup("running");
+        snprintf( gApp.model->serviceMsg, sizeof(gApp.model->serviceMsg)
+                , "connecting");
+        gApp.model->appMsg[0] = '\0';
+        gApp.model->errors = NULL;
     }
 
     initscr();
@@ -616,7 +626,10 @@ main(int argc, char * argv[]) {
         gApp.lines = termY;
         gApp.columns = termX;
     }
-	cbreak();
+	/* Go to raw mode to handle user input ourselves.
+     * Dev note: see https://stackoverflow.com/a/51049624/1734499 for nice
+     * tutorial of how to work in raw mode. */
+    raw();
 	noecho();
 
     /* Initialize layout */
@@ -634,14 +647,40 @@ main(int argc, char * argv[]) {
     pthread_t idelUpdaterThread;
     pthread_create( &idelUpdaterThread, NULL, _idle_updater, NULL );
 
+    pthread_t userInputThread;
+    pthread_create( &userInputThread, NULL, _user_input, NULL );
+
+    /* Initialize extensions */
+    for( struct ncrm_Extension ** extPtr = gApp.extensions
+       ; *extPtr
+       ; ++extPtr ) {
+        (*extPtr)->init(*extPtr, gApp.model);
+    }
+
     /* Event loop */
     while(!gApp.exitFlag) {
     	update_panels();  /* Update the stacking order. */
     	doupdate();  /* Show it on the screen */
         ncrm_do_with_events(process_event, NULL);
     }
+
+    /* Shutdown extensions */
+    for( struct ncrm_Extension ** extPtr = gApp.extensions
+       ; *extPtr
+       ; ++extPtr ) {
+        (*extPtr)->shutdown(*extPtr);
+    }
+
     ncrm_queue_free();
     endwin();
+
+    for( char ** err = gApp.model->errors
+       ; err && *err
+       ; ++err ) {
+        fputs(*err, stderr); fputc('\n', stderr);
+    }
+
+    fputs("Done.\n", stdout);  // XXX
 
     return EXIT_SUCCESS;
 }

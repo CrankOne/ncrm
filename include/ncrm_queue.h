@@ -21,8 +21,11 @@ struct ncrm_Event {
     int type:4;
     // ...
     union Payload {
-        char keypress;
-        // ...
+        unsigned int keycode;
+        struct {
+            char extensionName[16];
+            void * data;
+        } forExtension;
     } payload;
 };
 

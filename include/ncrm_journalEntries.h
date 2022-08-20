@@ -4,7 +4,7 @@
 /**\file
  *\brief Contains declarations related to steering of the logging journal shown.
 
- * NA64SW-Monitor app maintains a small in-memory storage for log messages with
+ * NCRM app maintains a small in-memory storage for log messages with
  * some basic querying capabilities (filtering by timestamp, categories,
  * wildcard, priority, etc). This file defines common routines to manage and
  * query this storage.
@@ -13,8 +13,8 @@
  * `ncrm_JournalEntry`) that has common properties: message text, its
  * priority (aka level, severity, etc), a timestamp and a category label.
  *
- * This messages are then united into blocks (of arbitrary size), contiguous in
- * memory -- to save some performance while retrieving and sorting them at a
+ * This messages are then grouped into blocks (of arbitrary size), contiguous
+ * in memory -- to save some performance while retrieving and sorting them at a
  * runtime. This is rather an internal type, `ncrm_JournalEntries` usually
  * existing as a single-linked list.
  * */
@@ -71,7 +71,7 @@ struct ncrm_JournalEntries {
  * */
 struct ncrm_JournalEntries *
 ncrm_je_append( struct ncrm_JournalEntries * dest
-                 , struct ncrm_JournalEntry * newBlock );
+              , struct ncrm_JournalEntry * newBlock );
 
 /**\brief Helper function that invokes a callback on every journal entry within
  *        all the blocks
@@ -86,9 +86,9 @@ ncrm_je_append( struct ncrm_JournalEntries * dest
  * */
 unsigned long
 ncrm_je_iterate( struct ncrm_JournalEntries * src
-                  , void (*callback)(struct ncrm_JournalEntry *, void *)
-                  , void * userData
-                  );
+               , void (*callback)(struct ncrm_JournalEntry *, void *)
+               , void * userData
+               );
 
 
 struct ncrm_QueryParams {
@@ -117,11 +117,23 @@ struct ncrm_QueryParams {
  * */
 unsigned long
 ncrm_je_query( const struct ncrm_JournalEntries * src
-                , const struct ncrm_QueryParams * qp
-                , struct ncrm_JournalEntry *** dest
-                );
+             , const struct ncrm_QueryParams * qp
+             , struct ncrm_JournalEntry *** dest
+             );
 
 struct ncrm_Extension;
+
+struct ncrm_JournalExtensionConfig {
+    /** Pointer to model config */
+    struct ncrm_Model * modelPtr;
+    /** Address of the socket to connect to (0MQ SUB)
+     * Example: "tcp://127.0.0.1:5555" */
+    char * address;
+    /** Check updates unce per msec (zero for blocking recv) */
+    unsigned int recvIntervalMSec;
+};
+
+extern struct ncrm_Extension gJournalExtension;
 
 #endif /* H_NCRM_MONITOR_JOURNAL_ENTRIES_H */
 

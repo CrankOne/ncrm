@@ -1,12 +1,23 @@
 #include "ncrm_journalEntries.h"
+#include "ncrm_queue.h"
+#include "ncrm_extension.h"
+#include "ncrm_model.h"
+
+#include <zmq.h>
+#include <msgpack.h>
 
 #include <assert.h>
 #include <string.h>
 #include <fnmatch.h>
 #include <stdlib.h>
 #include <limits.h>
+#include <unistd.h>
+
+#include <pthread.h>
 
 #define NCRM_NENTRIES_INC 1024
+#define NCRM_JOURNAL_MAX_BUFFER_LENGTH (5*1024*1024)
+#define NCRM_JOURNAL_EXTENSION_NAME "log"
 
 int
 ncrm_je_is_terminative_entry(const struct ncrm_JournalEntry * jePtr) {
@@ -45,7 +56,7 @@ _compare_journal_entries(const void * a_, const void * b_) {
 
 struct ncrm_JournalEntries *
 ncrm_je_append( struct ncrm_JournalEntries * dest
-                 , struct ncrm_JournalEntry * newBlock ) {
+              , struct ncrm_JournalEntry * newBlock ) {
     unsigned long newBlockSize;
     int merged;
     newBlockSize = ncrm_je_len(newBlock);
@@ -129,7 +140,8 @@ struct QueryCollector {
 };
 
 /** (internal) callback */
-static void _collect_entry_if_matches( struct ncrm_JournalEntry * je, void * qcPtr ) {
+static void
+_collect_entry_if_matches( struct ncrm_JournalEntry * je, void * qcPtr ) {
     struct QueryCollector * collector = (struct QueryCollector *) qcPtr;
     /* filter by level */
     if( collector->qp->levelRange[0] > -1 ) {
@@ -201,9 +213,9 @@ _compare_journal_entries_ptrs(const void * a_, const void * b_) {
 
 unsigned long
 ncrm_je_query( const struct ncrm_JournalEntries * src
-                , const struct ncrm_QueryParams * qp
-                , struct ncrm_JournalEntry *** dest
-                ) {
+             , const struct ncrm_QueryParams * qp
+             , struct ncrm_JournalEntry *** dest
+             ) {
     struct QueryCollector qc = {qp, NULL, 0, 0};
     ncrm_je_iterate( (struct ncrm_JournalEntries *) src
                       , _collect_entry_if_matches
@@ -303,5 +315,318 @@ main(int argc, char * argv[]) {
 
     return 0;
 }
+#else
+
+/* A bulky function converting unpacked msgpack's messages into jounral
+ * entries */
+static struct ncrm_JournalEntry *
+_convert_msgs_block( const msgpack_object_array * msgs ) {
+    struct ncrm_JournalEntry * newEntriesBlock
+        = malloc(sizeof(struct ncrm_JournalEntry)*(msgs->size+1));
+    ncrm_je_mark_as_terminative(newEntriesBlock + msgs->size);
+    for( uint64_t nMsg = 0; nMsg < msgs->size; ++nMsg ) {
+        struct ncrm_JournalEntry * dest = newEntriesBlock + nMsg;
+        msgpack_object * src = msgs->ptr + nMsg;
+        assert(src->type == MSGPACK_OBJECT_ARRAY);
+        assert(src->via.array.size == 4);
+        /* copy data */
+        dest->timest = src->via.array.ptr[0].via.u64;
+        dest->level  = src->via.array.ptr[1].via.u64;
+        dest->category
+            = strndup( src->via.array.ptr[2].via.str.ptr
+                     , src->via.array.ptr[2].via.str.size );
+        dest->message
+            = strndup( src->via.array.ptr[3].via.str.ptr
+                     , src->via.array.ptr[3].via.str.size );
+    }
+    return newEntriesBlock;
+}
+
+/*
+ * Extension definition
+ *//////////////////// */
+
+/* Static data structure, common for extension routines */
+static struct {
+    /** Listener (SUB) thread join condition
+     * Note: it is not guarded by mutex as there is only one thread actually
+     * modifying it */
+    int keepGoingFlag:1;
+    /** 0MQ (SUB) context receiving messages */
+    void * zmqContext
+       , * subscriber
+       ;
+    /** recv'ing buffer */
+    char * recvBuf;
+    /** Collected journal entries */
+    struct ncrm_JournalEntries * journalEntries;
+    /** Mutex protecting access to `journalEntries` */
+    pthread_mutex_t entriesLock;
+    /** Listener thread */
+    pthread_t listenerThread;
+} gLocalData;
+
+/** (internal) structure used to communicate problems from extension */
+struct ListenerThreadExitResults {
+    int rc;
+    char * errorDetails;
+};
+
+static void *
+_journal_updater(void * cfg_) {
+    struct ncrm_JournalExtensionConfig * cfg
+        = (struct ncrm_JournalExtensionConfig *) cfg_;
+
+    struct ListenerThreadExitResults * lteR
+        = malloc(sizeof(struct ListenerThreadExitResults));
+    bzero(lteR, sizeof(struct ListenerThreadExitResults));
+
+    struct ncrm_Event event;
+    event.type = 0x3;  /* for extension */
+    strncpy( event.payload.forExtension.extensionName
+           , NCRM_JOURNAL_EXTENSION_NAME
+           , sizeof(event.payload.forExtension.extensionName)
+           );
+
+    gLocalData.recvBuf = malloc(NCRM_JOURNAL_MAX_BUFFER_LENGTH);
+    gLocalData.zmqContext = zmq_ctx_new();
+    gLocalData.subscriber = zmq_socket(gLocalData.zmqContext, ZMQ_SUB);
+    int rc = zmq_connect(gLocalData.subscriber, cfg->address);
+    if( rc ) {
+        lteR->rc = 1;
+        lteR->errorDetails = malloc(128);
+        snprintf(lteR->errorDetails, 128
+                , "zmq_connect(\"%s\") return code: %d, %s"
+                , cfg->address, rc, zmq_strerror(errno) );
+        pthread_exit(lteR);
+    }
+    rc = zmq_setsockopt(gLocalData.subscriber, ZMQ_SUBSCRIBE, "", 0);
+    if( rc ) {
+        lteR->rc = 1;
+        lteR->errorDetails = malloc(128);
+        snprintf(lteR->errorDetails, 128
+                , "zmq_setsockopt(SUBSCRIBE) on \"%s\" return code: %d"
+                , cfg->address, rc );
+        pthread_exit(lteR);
+    }
+
+    while(gLocalData.keepGoingFlag) {
+        int recvRet = zmq_recv( gLocalData.subscriber
+                              , gLocalData.recvBuf
+                              , NCRM_JOURNAL_MAX_BUFFER_LENGTH
+                              , 0 == cfg->recvIntervalMSec ? 0 : ZMQ_DONTWAIT );
+        int errnoCpy = 0;
+        if( recvRet < 0 ) errnoCpy = errno;
+        if( 0 != cfg->recvIntervalMSec && EAGAIN == errnoCpy ) {
+            usleep(cfg->recvIntervalMSec*1e3);
+            continue;
+        }
+        if( recvRet == -1 ) {
+            lteR->rc = 2;
+            lteR->errorDetails = malloc(128);
+            snprintf(lteR->errorDetails, 128
+                    , "zmq_recv(...) on \"%s\" return code: %d, %s"
+                    , cfg->address, recvRet, zmq_strerror(errnoCpy) );
+            pthread_exit(lteR);
+        }
+        if( recvRet > NCRM_JOURNAL_MAX_BUFFER_LENGTH ) {
+            lteR->rc = 3;
+            lteR->errorDetails = malloc(256);
+            snprintf(lteR->errorDetails, 256
+                    , "zmq_recv(...) on \"%s\" fetched message of %d bytes"
+                      " length while ncrm \"" NCRM_JOURNAL_EXTENSION_NAME
+                      "\" extesnions limit is %d bytes max."
+                    , cfg->address, recvRet, NCRM_JOURNAL_MAX_BUFFER_LENGTH );
+            pthread_exit(lteR);
+        }
+
+        msgpack_unpacked msg;
+        msgpack_unpacked_init(&msg);
+        msgpack_unpack_return ret
+            = msgpack_unpack_next( &msg  /* ................. result */
+                                 , gLocalData.recvBuf  /* ... data */
+                                 , recvRet  /* .............. size */
+                                 , NULL  /* .............. (size_t *) offset */
+                                 );
+        if( !ret ) {
+            lteR->rc = 4;
+            lteR->errorDetails = malloc(256);
+            snprintf(lteR->errorDetails, 256
+                    , "msgpack_unpack_next(...) on \"%s\" return code: %d"
+                    , cfg->address, (int) ret );
+            pthread_exit(lteR);
+        }
+
+        /* Extract data; we expect the message to be an object */
+        msgpack_object root = msg.data;
+        if( root.type != MSGPACK_OBJECT_MAP ) {
+            lteR->rc = 5;
+            lteR->errorDetails = malloc(128);
+            snprintf(lteR->errorDetails, 128
+                    , "From \"%s\": root message node is of type %#x, not"
+                      " an object."
+                    , cfg->address, root.type );
+            pthread_exit(lteR);
+        }
+        /* NOTE: schemata checks below relate to the client API that for most
+         * of the cases should be provided by ncrm lib itself, so we only
+         * check schematic validity with assert() */
+        #if 0
+        {  // XXX
+            char bf[128];
+            snprintf(bf, sizeof(bf), "unpacking %d entries", root.via.map.size);
+            ncrm_mdl_error( cfg->modelPtr, bf );  // XXX
+        }
+        #endif
+        for( int nMapNode = 0; nMapNode < root.via.map.size; ++nMapNode ) {
+            const msgpack_object_kv * kv = root.via.map.ptr + nMapNode;
+            assert( kv->key.type == MSGPACK_OBJECT_STR );
+            char key[128];
+            strncpy(key, kv->key.via.str.ptr, kv->key.via.str.size);
+            key[ kv->key.via.str.size >= sizeof(key)
+               ? sizeof(key)-1
+               : kv->key.via.str.size
+               ] = '\0';
+            /* ^^^ NOTE this string is not null-terminated! */
+            //ncrm_mdl_error( cfg->modelPtr, key );  // XXX
+            if(!strcmp("j", key)) {
+                /* process journal entries */
+                assert( kv->val.type == MSGPACK_OBJECT_ARRAY );
+                struct ncrm_JournalEntry * newBlock
+                    = _convert_msgs_block(&(kv->val.via.array));
+                /* `gLocalData.journalEntries` is used by updating callback
+                 * from main thread, so it has to be synchronized */
+                pthread_mutex_lock(&gLocalData.entriesLock); {
+                    ncrm_je_append( gLocalData.journalEntries 
+                                  , newBlock
+                                  );
+                } pthread_mutex_unlock(&gLocalData.entriesLock);
+                continue;
+            }
+            if(!strcmp("status", key)) {
+                /* update model's status: must always be a (string, u-number) */
+                assert( kv->val.type == MSGPACK_OBJECT_ARRAY );
+                assert( kv->val.via.array.size == 2 );
+                pthread_mutex_lock(&cfg->modelPtr->lock); {
+                    const char * s
+                        = kv->val.via.array.ptr[0].via.str.ptr;
+                    const uint64_t ss
+                        = kv->val.via.array.ptr[0].via.str.size;
+                    if( !s || *s == '\0' ) {
+                        cfg->modelPtr->appMsg[0] = '\0';
+                    } else {
+                        strncpy( cfg->modelPtr->appMsg
+                               , s
+                               , sizeof(cfg->modelPtr->appMsg) );
+                        cfg->modelPtr->appMsg[ ss >= sizeof(cfg->modelPtr->appMsg)
+                                             ? sizeof(cfg->modelPtr->appMsg) - 1
+                                             : ss
+                                             ] = '\0';
+                    }
+                    cfg->modelPtr->statusMode
+                        = kv->val.via.array.ptr[1].via.u64;
+                } pthread_mutex_unlock(&cfg->modelPtr->lock);
+                continue;
+            }
+            if(!strcmp("progress", key)) {
+                /* update model's progress: must be always (number, number) */
+                assert( kv->val.type == MSGPACK_OBJECT_ARRAY );
+                assert( kv->val.via.array.size == 2 );
+                pthread_mutex_lock(&cfg->modelPtr->lock); {
+                    cfg->modelPtr->currentProgress
+                        = kv->val.via.array.ptr[0].via.u64;
+                    cfg->modelPtr->currentProgress
+                        = kv->val.via.array.ptr[1].via.u64;
+                } pthread_mutex_unlock(&cfg->modelPtr->lock);
+                continue;
+            }
+            if(!strcmp("elapsedTime", key)) {
+                /* update model's elapsed time: must always be just a number */
+                assert( kv->val.type == MSGPACK_OBJECT_POSITIVE_INTEGER );
+                cfg->modelPtr->elapsedTime
+                        = kv->val.via.u64;
+                continue;
+            }
+        }  /* end of journal entry message processing */
+        msgpack_unpacked_destroy(&msg);
+    }
+
+    zmq_close(gLocalData.subscriber);
+    zmq_ctx_destroy(gLocalData.zmqContext);
+    free(gLocalData.recvBuf);
+
+    pthread_exit(lteR);
+}
+
+static int
+_journal_entries_ext_init( struct ncrm_Extension * ext
+                         , struct ncrm_Model * modelPtr ) {
+    gLocalData.keepGoingFlag = 0x1;
+    assert(ext);
+    assert(ext->userData);
+    struct ncrm_JournalExtensionConfig * cfg
+        = (struct ncrm_JournalExtensionConfig *) ext->userData;
+    cfg->modelPtr = modelPtr;
+    pthread_mutex_init(&gLocalData.entriesLock, NULL);
+    pthread_create( &gLocalData.listenerThread, NULL, _journal_updater, cfg );
+    return 0;
+}
+
+static int
+_journal_entries_ext_update( struct ncrm_Extension * ext
+                           , struct ncrm_Event * event ) {
+    /* `gLocalData.journalEntries` is used by message-unpacking code
+     * from listener thread, so it has to be guarded */
+    pthread_mutex_lock(&gLocalData.entriesLock); {
+        //ncrm_je_append( gLocalData.journalEntries 
+        //              , newBlock
+        //              );
+        // TODO: update (or create and update) the window, based on data in
+        // gLocalData.journalEntries
+    } pthread_mutex_unlock(&gLocalData.entriesLock);
+    return 0;
+}
+
+static int
+_journal_entries_ext_shutdown(struct ncrm_Extension * ext) {
+    char errBf[128];
+    gLocalData.keepGoingFlag = 0x0;
+    void * listenerTheadReturn = NULL;
+    pthread_join(gLocalData.listenerThread, &listenerTheadReturn);
+    if( listenerTheadReturn ) {
+        struct ListenerThreadExitResults * lteR
+            = (struct ListenerThreadExitResults *) listenerTheadReturn;
+        if( lteR->rc ) {
+            snprintf( errBf, sizeof(errBf)
+                    , "Listener thread of"
+                    " \"" NCRM_JOURNAL_EXTENSION_NAME "\" exit with code %d"
+                    ": \"%s\"\n", lteR->rc, lteR->errorDetails );
+            ncrm_mdl_error( ((struct ncrm_JournalExtensionConfig *) (ext->userData))->modelPtr
+                          , errBf
+                          );
+            free(lteR->errorDetails);
+        }
+        int rc = lteR->rc;
+        free(lteR);
+        return rc;
+    } else {
+        snprintf( errBf, sizeof(errBf)
+                , "Listener thread of"
+                  " \"" NCRM_JOURNAL_EXTENSION_NAME "\" exit with NULL"
+                  " result.\n" );
+        ncrm_mdl_error( ((struct ncrm_JournalExtensionConfig *) (ext->userData))->modelPtr
+                      , errBf
+                      );
+        return -1;
+    }
+}
+
+struct ncrm_Extension gJournalExtension = {
+    NCRM_JOURNAL_EXTENSION_NAME, 'l', NULL,
+    _journal_entries_ext_init,
+    _journal_entries_ext_update,
+    _journal_entries_ext_shutdown
+};
+
 #endif
 
