@@ -1,3 +1,19 @@
+/* Copyright (C) 2022, Renat R. Dusaev
+ * 
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ * 
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ * 
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #ifndef H_NCRM_QUEUE_H
 #define H_NCRM_QUEUE_H
 
@@ -6,6 +22,15 @@
 
 /** Max size of the event queue */
 #define NCRM_MAX_EVENTS_IN_QUEUE 1024
+
+enum ncrm_EventType {
+    ncrm_kEventUnknown = 0x0,
+    ncrm_kEventIncrementUpdateCount = 0x1,
+    ncrm_kEventKeypress = 0x2,
+    ncrm_kEventExtension = 0x3,
+    ncrm_kEventHeaderUpdate = 0x4,
+    ncrm_kEventFooterUpdate = 0x5,
+};
 
 /**\brief Representation of asynchroneous event (subject of event queue) */
 struct ncrm_Event {
@@ -18,7 +43,7 @@ struct ncrm_Event {
      *  0x5  -- footer update
      *  ...
      * */
-    int type:4;
+    enum ncrm_EventType type;
     // ...
     union Payload {
         unsigned int keycode;

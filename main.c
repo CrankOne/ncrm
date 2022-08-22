@@ -10,6 +10,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <limits.h>
 
 #define NCRM_MAX_STATUSBAR_TXT_LEN 128
 
@@ -31,14 +32,6 @@ ____________________________/ handlers /_calibrations_
  *
  * Note: currently, only progress/journal messages supported.
  * */
-
-/* Array of special attributes */
-attr_t gSpecialAttrs[] = { A_NORMAL /* 0 - Normal mode */
-    , A_DIM  /* 1 - disconnected / darmant / idle / not important */
-    , A_BOLD | COLOR_PAIR(1) /* 2 - warning */
-    , A_BOLD | COLOR_PAIR(2) /* 3 - error */
-    , A_BLINK  /* 4 - requires (immediate) attention / fatal error */
-};
 
 static struct App {
     /** Model to show */
@@ -72,7 +65,7 @@ static struct App {
 static void *
 _idle_updater(void * _) {
     for(;;) {
-        struct ncrm_Event event = { 0x1 };
+        struct ncrm_Event event = { ncrm_kEventIncrementUpdateCount };
         ncrm_enqueue(&event);
         usleep(1.e5);
     }
@@ -81,7 +74,7 @@ _idle_updater(void * _) {
 
 static void *
 _user_input(void * _) {
-    struct ncrm_Event event = { 0x2 };
+    struct ncrm_Event event = { ncrm_kEventKeypress };
     while(read( STDIN_FILENO
               , &event.payload.keycode
               , sizeof(event.payload.keycode)) != 0) {
@@ -120,7 +113,7 @@ update_header() {
     wattron(gApp.w_tabsHeader, A_BOLD );
 
     wattron(gApp.w_tabsHeader, A_UNDERLINE | A_DIM);
-    whline(gApp.w_tabsHeader, ACS_S7, gApp.columns);
+    whline(gApp.w_tabsHeader, ' ', gApp.columns);
     wattroff(gApp.w_tabsHeader, A_UNDERLINE | A_DIM);
 
     if( !gApp.extensions ) {
@@ -246,6 +239,38 @@ static int _status_format_time(unsigned long timeMSec, char * bf) {
     if( sec || mins || hours || days )
         nUsed += snprintf( bf + nUsed, (NCRM_MAX_STATUSBAR_TXT_LEN - nUsed)
                          , "%02ds", sec );
+    return nUsed;
+}
+
+/* A simple timestamp formatter for journal entries wrapping the main one.
+ * Not much customizable. Assumes timestamp to be in microseconds. */
+static uint16_t
+_journal_timestamp_formatter( struct ncrm_JournalTimestampFormat * fmtObj
+                            , char * bf
+                            , uint64_t timeMSec
+                            ) {
+    unsigned long epsTimeSec = timeMSec / 1e3;  /* msec to sec */
+    if(!epsTimeSec)
+        return snprintf( bf, NCRM_MAX_STATUSBAR_TXT_LEN
+                       , "%lums", timeMSec );
+    int days = epsTimeSec/(24*60*60)
+      , hours = (epsTimeSec - days*(24*60*60))/(60*60)
+      , mins = (epsTimeSec - days*(24*60*60) - hours*(60*60) )/60
+      , sec = epsTimeSec%60
+      , msec = timeMSec%1000;
+      ;
+    int32_t nUsed = 0;
+    if( days )
+        nUsed += snprintf( bf, NCRM_MAX_STATUSBAR_TXT_LEN, "%dd,", days );
+    if( hours || days )
+        nUsed += snprintf( bf + nUsed, (NCRM_MAX_STATUSBAR_TXT_LEN - nUsed)
+                         , "%02d:", hours );
+    nUsed += snprintf( bf + nUsed, (NCRM_MAX_STATUSBAR_TXT_LEN - nUsed)
+                     , "%02d:", mins );
+    nUsed += snprintf( bf + nUsed, (NCRM_MAX_STATUSBAR_TXT_LEN - nUsed)
+                     , "%02d:", sec );
+    nUsed += snprintf( bf + nUsed, (NCRM_MAX_STATUSBAR_TXT_LEN - nUsed)
+                     , "%03d", msec );
     return nUsed;
 }
 
@@ -462,7 +487,7 @@ update_footer( int maxlen ) {
     wmove(gApp.w_statusFooter, 0, 0);
     attr_t footerAttrs = A_DIM;
     wattrset(gApp.w_statusFooter, footerAttrs );
-    whline(gApp.w_statusFooter, '/', gApp.columns);
+    whline(gApp.w_statusFooter, ACS_S1, gApp.columns);
 
     pthread_mutex_lock(&gApp.model->lock);
 
@@ -535,13 +560,14 @@ update_footer( int maxlen ) {
                 wattrset(gApp.w_statusFooter, pieh->pie->attrs );
             } else {
                 const int n = piehs[i].buf[piehs[i].occupied+2];
-                assert(n < sizeof(gSpecialAttrs)/sizeof(*gSpecialAttrs ));
+                assert(n < gNSpecialAttrs);
                 wattron(gApp.w_statusFooter, pieh->pie->attrs | gSpecialAttrs[n]);
             }
             
             wprintw(gApp.w_statusFooter, pieh->buf);
         }
     }
+    waddch(gApp.w_statusFooter, '/');
     wattrset(gApp.w_statusFooter, footerAttrs );
     pthread_mutex_unlock(&gApp.model->lock);
 }
@@ -550,27 +576,42 @@ void
 process_event(struct ncrm_Event * eventPtr, void * _) {
     /* Calls curses routines to update the GUI, may forward execution to
      * extension's updating function */
-    if( 0x1 == eventPtr->type ) {  /* increment update count */
+    if( ncrm_kEventIncrementUpdateCount == eventPtr->type ) {
         ++gApp.updateCount;
         update_footer(gApp.columns);
         return;
     }
-    if( 0x2 == eventPtr->type ) {  /* keypress event */
+    if( ncrm_kEventKeypress == eventPtr->type ) {  /* keypress event */
         if( eventPtr->payload.keycode == 'q' ) {  /* exit */
             gApp.exitFlag = 0x1;
         }
         /* ignore other keypresses */
         return;
     }
-    if(0x3 == eventPtr->type) {  /* forward event to extension update */
+    /* forward event to extension update; deny update if extension is NOT
+     * active */
+    if(ncrm_kEventExtension == eventPtr->type) {
+        uint16_t nExt = 0;
         for( struct ncrm_Extension ** extPtr = gApp.extensions
            ; *extPtr
-           ; ++extPtr ) {
-            if( !strcmp( eventPtr->payload.forExtension.extensionName
+           ; ++extPtr, ++nExt ) {
+            if( nExt == gApp.nActiveExtension
+             && !strcmp( eventPtr->payload.forExtension.extensionName
                        , (*extPtr)->name
-                       ) )
-            (*extPtr)->update(*extPtr, eventPtr);
+                       ) ) {
+                (*extPtr)->update(*extPtr, eventPtr);
+                break;
+            }
         }
+        return;
+    }
+    if( ncrm_kEventHeaderUpdate == eventPtr->type ) {
+        update_header();
+        return;
+    }
+    if( ncrm_kEventFooterUpdate == eventPtr->type ) {
+        update_footer(gApp.columns);
+        return;
     }
 }
 
@@ -590,7 +631,18 @@ main(int argc, char * argv[]) {
     struct ncrm_JournalExtensionConfig jCfg = {
         NULL,  /* modelPtr (set automatically) */
         "tcp://127.0.0.1:5598",  /* addres to subscribe */
-        100  /* network query interval, msec */
+        100,  /* network query interval, msec */
+        {  /* Default query parameters */
+            NULL,  /* category pattern */
+            NULL,  /* message pattern */
+            { 0, 1000 },  /* priority range, -1 to unset */
+            { 0, 1000 },  /* time range, ULONG_MAX to unset */
+        },
+        {  /* Default timestamp formatter */
+            _journal_timestamp_formatter
+        },
+        /* Initial dimesnions, updated automatically */
+        {{0, 0}, {0, 0}},
     };
     gApp.extensions[0]->userData = &jCfg;
 
@@ -613,10 +665,16 @@ main(int argc, char * argv[]) {
     if( has_colors() != FALSE ) {
         use_default_colors();
         start_color();
+        #if 0
         init_pair(1, COLOR_GREEN, -1);  /* used to show "on line" messages */
         init_pair(2, COLOR_BLUE, -1);  /* used for general information */
         init_pair(3, COLOR_WHITE, COLOR_YELLOW );  /* used for warnings */
         init_pair(4, COLOR_RED, COLOR_WHITE );  /* used for errors */
+        #else
+        #define ncrm_define_pair(num, clr1, clr2, ...) init_pair(num, clr1, clr2);
+        ncrm_for_every_colorpair(ncrm_define_pair)
+        #undef ncrm_define_pair
+        #endif
     }
 
     curs_set(0);
@@ -654,7 +712,12 @@ main(int argc, char * argv[]) {
     for( struct ncrm_Extension ** extPtr = gApp.extensions
        ; *extPtr
        ; ++extPtr ) {
-        (*extPtr)->init(*extPtr, gApp.model);
+        (*extPtr)->init( *extPtr, gApp.model
+                       , 1  /* top */
+                       , 0  /* left */
+                       , gApp.lines - 2  /* height */
+                       , gApp.columns  /* width */
+                       );
     }
 
     /* Event loop */

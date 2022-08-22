@@ -1,4 +1,4 @@
-Disclaimer: a draft project.
+Disclaimer: it is a draft project.
 
 # Number cruncher monitor application
 
@@ -7,12 +7,16 @@ and perfrom basic steering of some local or remote process. It leverages log
 browsing and provides API for some basic introspection.
 
 It is organized as ncurses-based application (therefore, it offers some kind
-of a "GUI") with tabbed layout.
+of a "GUI") with tabbed layout. Its main purpose is to facilitate inspection
+of scientific data handling applications at a runtime. There are some typical
+tasks that arise for this kind of apps like intercepting unhandled output to
+stdandard streams by third-party utils, tracing progress, filtering logs, etc.
 
 # Design
 
-The main thread is responsible for event loop and GUI updating. It maintains
-a global `AppConfig` instance that essentially reflects current application
+The main thread is responsible for event loop and GUI updating (as ncurses
+explicitly declares itself as a single-thread lib). Main threads maintains
+a global data model instance that essentially reflects current application
 state: set of active extensions, reference to *data model* and ncurses windows
 and panels (there are few that does not depend on currently active *extension*)
 and event queue.
@@ -20,8 +24,9 @@ and event queue.
 ## Event Loop
 
 Main thread usually spends most of its time waiting for conditional variable
-steering event queue. *Events* are key presses, content updates requestests,
-etc. An event usually provokes some updates on the content shown.
+steering *event queue*. *Events* are key presses, content updates requestests,
+etc. An event usually provokes some updates on the content shown by pushing an
+event to *event queue*.
 
 ## Extensions
 

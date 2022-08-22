@@ -1,3 +1,19 @@
+/* Copyright (C) 2022, Renat R. Dusaev
+ * 
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ * 
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ * 
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #include "ncrm_queue.h"
 
 #include <pthread.h>
@@ -25,7 +41,7 @@ _alloc_evlist_entry() {
     pthread_mutex_lock(&gEventPoolMutex); {
         uint32_t nEvent = 0;
         for( evEntry = gEventListEntriesPool
-           ; (evEntry->isInUse & 0x1) && nEvent < NCRM_MAX_EVENTS_IN_QUEUE
+           ; (evEntry->isInUse & 0x1) && nEvent <= NCRM_MAX_EVENTS_IN_QUEUE
            ; ++evEntry, ++nEvent ) {}
         if( nEvent == NCRM_MAX_EVENTS_IN_QUEUE ) {
             /* failed to allocate new event (entire pool busy) */
@@ -33,6 +49,9 @@ _alloc_evlist_entry() {
             return NULL;
         }
         evEntry->isInUse = 0x1;
+        evEntry->next = NULL;
+        /* no need to zero event object as it will be anyway overwritten by
+         * memcpy() */
     } pthread_mutex_unlock(&gEventPoolMutex);
     return evEntry;
 }
@@ -68,6 +87,7 @@ ncrm_enqueue( struct ncrm_Event * eventPtr ) {
     struct EventListEntry * evListEntry = _alloc_evlist_entry();
     if( !evListEntry ) return -1;
     memcpy(&evListEntry->eventObject, eventPtr, sizeof(struct ncrm_Event));
+    /* ^^^ note that here we completely overwrite evListEntry->eventObject */
     /* Add event list entry into queue */
     pthread_mutex_lock(&(gQueue.mtxQueueEmpty));
     {

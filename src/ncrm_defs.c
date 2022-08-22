@@ -14,30 +14,15 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "ncrm_model.h"
+#include "ncrm_defs.h"
 
-#include <assert.h>
-#include <stdlib.h>
-#include <string.h>
+/* Array of special attributes */
+const attr_t gSpecialAttrs[] = { A_NORMAL /* 0 - Normal mode */
+    , A_DIM  /* 1 - disconnected / darmant / idle / not important */
+    , A_BOLD | COLOR_PAIR(1) /* 2 - warning */
+    , A_BOLD | COLOR_PAIR(2) /* 3 - error */
+    , A_BLINK  /* 4 - requires (immediate) attention / fatal error */
+};
 
-void
-ncrm_mdl_error( struct ncrm_Model * mdl, const char * newErr ) {
-    assert(newErr);
-    pthread_mutex_lock(&mdl->lock);
-    /* Count current number of errors */
-    int nErrors = 1;
-    for( char ** cErr = mdl->errors
-       ; cErr && *cErr
-       ; ++cErr, ++nErrors ) {}
-    assert(nErrors);
-    --nErrors;
-    if( 0 == nErrors ) {
-        mdl->errors = malloc(2*sizeof(char*));
-    } else {
-        mdl->errors = realloc(mdl->errors, (nErrors + 2)*sizeof(char*));
-    }
-    mdl->errors[nErrors] = strdup(newErr);
-    mdl->errors[nErrors + 1] = NULL;
-    pthread_mutex_unlock(&mdl->lock);
-}
+const int gNSpecialAttrs = sizeof(gSpecialAttrs)/sizeof(attr_t);
 

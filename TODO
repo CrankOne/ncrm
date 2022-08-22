@@ -1,0 +1,22 @@
+General:
+1. It seems, certain key presses (like arrows) hangs user input listener
+   thread.
+2. C/C++ client API
+
+Journaling extension:
+1. Currently reproducible state for j.txt in log extesnion: messages that are
+   late by >1 chunk get lost. Shall resolve it by lookup for corresponding
+   block, re-allocating it and adding this late message entry. Though, lookup
+   and re-allocation procedure is expensive, we do not expect it to happen
+   frequently. Also re-fragmenting (elder?) blocks would be a nice idea (file
+   caching?).
+2. "slow joiner" problem for pub/sub, see here: https://zguide.zeromq.org/docs/chapter5/
+   In Python server script we currently workaround this problem with explicit
+   delay. Correct way of resolving this would need introduction of additional
+   ROUTER/DEALER kind of connection. We plan to use this kind of conversation
+   anyway.
+3. ANSI escape sequences shall be probably filtered out from log messages as
+   they not interpreted by ncurses anyway.
+4. Let's restrict minimum virtual width of journaling extension with 80 chars
+5. Scrolling support for journaling extension
+

@@ -1,5 +1,23 @@
+/* Copyright (C) 2022, Renat R. Dusaev
+ * 
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ * 
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ * 
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #ifndef H_NCRM_EXTENSION_H
 #define H_NCRM_EXTENSION_H
+
+#include <stdint.h>
 
 struct ncrm_Event;
 
@@ -23,7 +41,8 @@ struct ncrm_Extension {
     void * userData;
 
     /** Invoked at startup. May create listener thread's, allocate datas, etc. */
-    int (*init)(struct ncrm_Extension *, struct ncrm_Model *);
+    int (*init)( struct ncrm_Extension *, struct ncrm_Model *
+               , uint16_t top, uint16_t left, uint16_t nLines, uint16_t nCols );
     /** Invoked to update GUI content of a tab */
     int (*update)(struct ncrm_Extension *, struct ncrm_Event *);
     /** Invoked at application shutdown */

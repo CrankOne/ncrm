@@ -1,3 +1,19 @@
+/* Copyright (C) 2022, Renat R. Dusaev
+ * 
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ * 
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ * 
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #ifndef H_NCRM_MONITOR_JOURNAL_ENTRIES_H
 #define H_NCRM_MONITOR_JOURNAL_ENTRIES_H
 
@@ -18,6 +34,21 @@
  * runtime. This is rather an internal type, `ncrm_JournalEntries` usually
  * existing as a single-linked list.
  * */
+
+#include <stdint.h>
+
+/** Reallocation stride in case of new block needed */
+#define NCRM_NENTRIES_INC 1024
+/** Size of static destination buffer to recieve the entries */
+#define NCRM_JOURNAL_MAX_BUFFER_LENGTH (5*1024*1024)
+/** Name of extension */
+#define NCRM_JOURNAL_EXTENSION_NAME "log"
+/** Maximum log entries shown in window */
+#define NCRM_JOURNAL_MAX_LINES_SHOWN 256
+/** Max length of timestamp string */
+#define NCRM_JOURNAL_MAX_TIMESTAMP_LEN 64
+/** Max length of a single message shown in window */
+#define NCRM_JOURNAL_MAX_LEN (5*1024)
 
 /** A journal message timestamp type */
 typedef unsigned long ncrm_Timestamp_t;
@@ -81,12 +112,12 @@ ncrm_je_append( struct ncrm_JournalEntries * dest
  * go first), entries are ascending.
  *
  * \param src[in] a journal entries set to iterate over
- * \param callback[in] a callback function to call
+ * \param callback[in] a callback function to call; shall return non-zero to stop
  * \param userData[in] a supplementary data to be provided to a callback
  * */
 unsigned long
 ncrm_je_iterate( struct ncrm_JournalEntries * src
-               , void (*callback)(struct ncrm_JournalEntry *, void *)
+               , int (*callback)(struct ncrm_JournalEntry *, void *)
                , void * userData
                );
 
@@ -121,6 +152,19 @@ ncrm_je_query( const struct ncrm_JournalEntries * src
              , struct ncrm_JournalEntry *** dest
              );
 
+/**\brief Timestamp formatting settings */
+struct ncrm_JournalTimestampFormat {
+    /** Shall format timestamp string for given entry `entry`, write the string
+     * to `dest` and return count of meaningful bytes (zero termination is not
+     * necessary).*/
+    uint16_t (*callback)( struct ncrm_JournalTimestampFormat *
+                        , char * dest
+                        , ncrm_Timestamp_t //const struct ncrm_JournalEntry * entry
+                        );
+    // ...
+};
+
+
 struct ncrm_Extension;
 
 struct ncrm_JournalExtensionConfig {
@@ -131,6 +175,13 @@ struct ncrm_JournalExtensionConfig {
     char * address;
     /** Check updates unce per msec (zero for blocking recv) */
     unsigned int recvIntervalMSec;
+    /** Default (starting) query parameters for new view */
+    struct ncrm_QueryParams defaultQueryParameters;
+    /** Default (starting) timestamp formatter settings */
+    struct ncrm_JournalTimestampFormat defaultTimestampFormatter;
+    /** Dimensions (set automatically at extension initialization, updated
+     * by resize event)*/
+    uint16_t dims[2][2];
 };
 
 extern struct ncrm_Extension gJournalExtension;
